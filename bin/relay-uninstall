@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+RELAY_DIR="${AGENT_RELAY_DIR:-$HOME/.agent-relay}"
+
+log()  { echo "[relay-uninstall] $*"; }
+warn() { echo "[relay-uninstall] WARNING: $*" >&2; }
+
+KEEP_DATA=false
+YES=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --keep-data) KEEP_DATA=true; shift ;;
+        --yes|-y)    YES=true; shift ;;
+        -h|--help)
+            echo "Usage: relay-uninstall [--keep-data] [--yes]"
+            echo ""
+            echo "  --keep-data  Preserve archive/, logs/, and costs.log"
+            echo "  --yes        Skip confirmation prompt"
+            exit 0 ;;
+        *) echo "Error: Unknown argument: $1" >&2; exit 1 ;;
+    esac
+done
+
+echo ""
+echo "=== relay-uninstall ==="
+echo ""
+echo "This will remove:"
+echo "  - relay-worker daemon (stop + unload autostart)"
+echo "  - $RELAY_DIR/"
+if [[ "$KEEP_DATA" == true ]]; then
+    echo "    (archive/, logs/ will be preserved at ~/agent-relay-data/)"
+fi
+echo "  - PATH entry from shell rc"
+echo "  - Claude Code hooks (relay-status)"
+echo "  - Agent Relay block from ~/.claude/CLAUDE.md"
+echo ""
+
+if [[ "$YES" != true ]]; then
+    read -r -p "Continue? [y/N] " REPLY
+    if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
+        echo "Aborted."
+        exit 0
+    fi
+fi
+
+# 1. Stop daemon
+PID_FILE="$RELAY_DIR/relay-worker.pid"
+if [[ -f "$PID_FILE" ]]; then
+    PID=$(cat "$PID_FILE")
+    if kill -0 "$PID" 2>/dev/null; then
+        log "Stopping relay-worker (pid $PID)..."
+        kill "$PID"
+        sleep 1
+    fi
+    rm -f "$PID_FILE"
+fi
+
+# 2. Unload / disable autostart
+PLATFORM="$(uname -s)"
+if [[ "$PLATFORM" == "Darwin" ]]; then
+    PLIST="$HOME/Library/LaunchAgents/com.agent-relay.worker.plist"
+    if [[ -f "$PLIST" ]]; then
+        log "Unloading LaunchAgent..."
+        launchctl unload "$PLIST" 2>/dev/null || true
+        rm -f "$PLIST"
+        log "LaunchAgent removed"
+    fi
+elif [[ "$PLATFORM" == "Linux" ]]; then
+    SVC="$HOME/.config/systemd/user/agent-relay.service"
+    if [[ -f "$SVC" ]]; then
+        log "Disabling systemd service..."
+        systemctl --user disable --now agent-relay 2>/dev/null || true
+        rm -f "$SVC"
+        systemctl --user daemon-reload 2>/dev/null || true
+        log "systemd service removed"
+    fi
+fi
+
+# 3. Optionally preserve data before deleting relay dir
+if [[ "$KEEP_DATA" == true ]] && [[ -d "$RELAY_DIR" ]]; then
+    SAVE_DIR="$HOME/agent-relay-data"
+    mkdir -p "$SAVE_DIR"
+    [[ -d "$RELAY_DIR/archive" ]] && cp -r "$RELAY_DIR/archive" "$SAVE_DIR/" && log "Saved archive/ → $SAVE_DIR/archive/"
+    [[ -d "$RELAY_DIR/logs"    ]] && cp -r "$RELAY_DIR/logs"    "$SAVE_DIR/" && log "Saved logs/    → $SAVE_DIR/logs/"
+fi
+
+# 4. Remove relay dir
+if [[ -d "$RELAY_DIR" ]]; then
+    log "Removing $RELAY_DIR..."
+    rm -rf "$RELAY_DIR"
+fi
+
+# 5. Remove PATH entry from shell rc
+for RC in "$HOME/.zshrc" "$HOME/.bashrc"; do
+    if [[ -f "$RC" ]] && grep -q "agent-relay" "$RC"; then
+        log "Removing PATH entry from $RC..."
+        # Remove the 3-line block: blank line + comment + export
+        python3 - <<PYEOF
+import re
+path = "$RC"
+with open(path) as f:
+    content = f.read()
+# Remove the block relay-install adds
+cleaned = re.sub(r'\n# agent-relay\nexport PATH="\$HOME/\.agent-relay/bin:\$PATH"\n?', '', content)
+# Also remove any stray standalone references
+cleaned = re.sub(r'\nexport PATH="\$HOME/\.agent-relay/bin:\$PATH"\n?', '\n', cleaned)
+with open(path, 'w') as f:
+    f.write(cleaned)
+PYEOF
+    fi
+done
+
+# 6. Remove CC hooks
+CLAUDE_SETTINGS="$HOME/.claude/settings.json"
+if [[ -f "$CLAUDE_SETTINGS" ]] && grep -q "relay-status" "$CLAUDE_SETTINGS"; then
+    log "Removing CC hooks from settings.json..."
+    python3 - <<PYEOF
+import json
+
+path = "$CLAUDE_SETTINGS"
+with open(path) as f:
+    settings = json.load(f)
+
+hooks = settings.get("hooks", {})
+for event in list(hooks.keys()):
+    hooks[event] = [
+        entry for entry in hooks[event]
+        if not any(h.get("command", "").startswith("relay-") for h in entry.get("hooks", []))
+    ]
+    if not hooks[event]:
+        del hooks[event]
+
+if not hooks:
+    settings.pop("hooks", None)
+else:
+    settings["hooks"] = hooks
+
+with open(path, "w") as f:
+    json.dump(settings, f, indent=2)
+PYEOF
+fi
+
+# 7. Remove Agent Relay block from CLAUDE.md
+CLAUDE_MD="$HOME/.claude/CLAUDE.md"
+if [[ -f "$CLAUDE_MD" ]] && grep -q "Agent Relay" "$CLAUDE_MD"; then
+    log "Removing Agent Relay block from CLAUDE.md..."
+    python3 - <<PYEOF
+path = "$CLAUDE_MD"
+with open(path) as f:
+    content = f.read()
+
+# Remove from '## Agent Relay' to the next top-level '## ' heading (or EOF)
+import re
+cleaned = re.sub(r'\n## Agent Relay\b.*?(?=\n## |\Z)', '', content, flags=re.DOTALL)
+# Clean up any double blank lines left behind
+cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).rstrip() + '\n'
+with open(path, 'w') as f:
+    f.write(cleaned)
+PYEOF
+fi
+
+echo ""
+echo "=== relay-uninstall complete ==="
+if [[ "$KEEP_DATA" == true ]]; then
+    echo "Data preserved at: $HOME/agent-relay-data/"
+fi
+echo ""
+echo "Reload your shell to clear the PATH:  exec \$SHELL"
