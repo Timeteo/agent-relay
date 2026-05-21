@@ -17,7 +17,7 @@ A file-based inter-agent relay system for Claude Code. Delegate tasks to sub-age
 ## Quick Start
 
 ```bash
-git clone https://github.com/yourusername/agent-relay
+git clone https://github.com/Timeteo/agent-relay
 cd agent-relay
 ./bin/relay-install
 ```
