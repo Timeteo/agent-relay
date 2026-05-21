@@ -92,7 +92,7 @@ Monthly cost (May 2026): $0.42
 |-----------|-------------------|
 | Complex code generation | `qwen/qwen3-coder-480b-a35b` |
 | Reasoning / debugging | `deepseek/deepseek-r1` |
-| Fast / cheap boilerplate | `google/gemini-flash-lite` (free tier) |
+| Fast / cheap boilerplate | `google/gemini-2.0-flash-lite-001` (free tier) |
 | General coding | `deepseek/deepseek-v3` |
 
 Pass `--model` to override the default. Default is set in `~/.agent-relay/config.json`.

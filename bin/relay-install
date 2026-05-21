@@ -18,7 +18,7 @@ mkdir -p "$RELAY_DIR"/{queue,processing,done,archive,logs}
 
 # 2. Copy scripts
 log "Copying scripts to $BIN_DIR..."
-cp "$REPO_DIR/bin/"* "$BIN_DIR/"
+find "$REPO_DIR/bin" -maxdepth 1 -type f -exec cp {} "$BIN_DIR/" \;
 chmod +x "$BIN_DIR/"*
 
 # 3. PATH
@@ -46,7 +46,7 @@ if [[ ! -f "$CONFIG" ]]; then
   "version": "1.0",
   "relay_dir": "~/.agent-relay",
   "default_model": "qwen/qwen3-coder-480b-a35b",
-  "fallback_model": "google/gemini-flash-lite",
+  "fallback_model": "google/gemini-2.0-flash-lite-001",
   "openrouter": {
     "api_key": "$OPENROUTER_API_KEY",
     "base_url": "https://openrouter.ai/api/v1"
@@ -96,7 +96,9 @@ if [[ "$PLATFORM" == "Darwin" ]]; then
     PLIST_DST="$HOME/Library/LaunchAgents/com.agent-relay.worker.plist"
     if [[ ! -f "$PLIST_DST" ]]; then
         log "Installing macOS LaunchAgent..."
-        sed "s|~|$HOME|g" "$REPO_DIR/autostart/com.agent-relay.worker.plist" > "$PLIST_DST"
+        PYTHON_BIN="$(which python3)"
+        sed -e "s|~|$HOME|g" -e "s|/usr/bin/python3|$PYTHON_BIN|g" \
+            "$REPO_DIR/autostart/com.agent-relay.worker.plist" > "$PLIST_DST"
         launchctl load "$PLIST_DST" 2>/dev/null && log "LaunchAgent loaded" \
             || warn "launchctl load failed — use relay-daemon start manually"
     fi

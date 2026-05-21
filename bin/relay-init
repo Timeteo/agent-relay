@@ -21,7 +21,7 @@ if [[ ! -f "$CONFIG" ]]; then
   "version": "1.0",
   "relay_dir": "~/.agent-relay",
   "default_model": "qwen/qwen3-coder-480b-a35b",
-  "fallback_model": "google/gemini-flash-lite",
+  "fallback_model": "google/gemini-2.0-flash-lite-001",
   "openrouter": {
     "api_key": "$OPENROUTER_API_KEY",
     "base_url": "https://openrouter.ai/api/v1"
@@ -108,7 +108,8 @@ if [[ "$PLATFORM" == "Darwin" ]]; then
 
     if [[ ! -f "$PLIST_DST" ]] && [[ -f "$PLIST_TMPL" ]]; then
         log "Installing macOS LaunchAgent..."
-        sed "s|~|$HOME|g" "$PLIST_TMPL" > "$PLIST_DST"
+        PYTHON_BIN="$(which python3)"
+        sed -e "s|~|$HOME|g" -e "s|/usr/bin/python3|$PYTHON_BIN|g" "$PLIST_TMPL" > "$PLIST_DST"
         launchctl load "$PLIST_DST" 2>/dev/null && log "LaunchAgent loaded" \
             || warn "launchctl load failed — run manually or use relay-daemon start"
     fi
