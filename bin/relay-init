@@ -152,7 +152,7 @@ def ensure_hook(event, command):
     entries.append({"matcher": "", "hooks": [{"type": "command", "command": command}]})
 
 ensure_hook("PostCompact", "relay-status")
-ensure_hook("Startup", "relay-status")
+ensure_hook("SessionStart", "relay-status")
 
 with open(path, "w") as f:
     json.dump(settings, f, indent=2)
