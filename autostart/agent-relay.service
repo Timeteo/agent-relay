@@ -1,0 +1,11 @@
+[Unit]
+Description=Agent Relay Worker
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 ~/.agent-relay/bin/relay-worker.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

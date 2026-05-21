@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+RELAY_DIR="${AGENT_RELAY_DIR:-$HOME/.agent-relay}"
+
+RELAY_DIR="$RELAY_DIR" python3 - <<'PYEOF'
+import json, os, datetime
+
+relay_dir = os.environ["RELAY_DIR"]
+pid_file = os.path.join(relay_dir, "relay-worker.pid")
+queue_dir = os.path.join(relay_dir, "queue")
+processing_dir = os.path.join(relay_dir, "processing")
+done_dir = os.path.join(relay_dir, "done")
+pending_log = os.path.join(relay_dir, "pending.log")
+costs_log = os.path.join(relay_dir, "logs", "costs.log")
+
+# Daemon status
+daemon_status = "STOPPED"
+if os.path.exists(pid_file):
+    try:
+        pid = int(open(pid_file).read().strip())
+        os.kill(pid, 0)
+        daemon_status = f"RUNNING (pid {pid})"
+    except (ProcessLookupError, PermissionError):
+        daemon_status = f"STOPPED (stale pid {pid})"
+    except Exception:
+        daemon_status = "UNKNOWN"
+
+def count_sentinels(directory):
+    if not os.path.exists(directory):
+        return 0
+    return len([f for f in os.listdir(directory) if f.endswith(".ready")])
+
+queue_count = count_sentinels(queue_dir)
+processing_count = count_sentinels(processing_dir)
+done_count = count_sentinels(done_dir)
+
+# Load pending log
+pending = {}
+if os.path.exists(pending_log):
+    with open(pending_log) as f:
+        for line in f:
+            line = line.strip()
+            if " | " in line:
+                parts = line.split(" | ", 2)
+                if len(parts) >= 3:
+                    pending[parts[0]] = {"ts": parts[1], "desc": parts[2]}
+
+def task_age_str(json_path, time_key):
+    try:
+        with open(json_path) as f:
+            data = json.load(f)
+        ts = datetime.datetime.fromisoformat(data[time_key].replace("Z", "+00:00"))
+        now = datetime.datetime.now(datetime.timezone.utc)
+        mins = int((now - ts).total_seconds() / 60)
+        return f"{mins}m ago"
+    except Exception:
+        return "?"
+
+# Ready for pickup
+ready_tasks = []
+if os.path.exists(done_dir):
+    for fname in sorted(os.listdir(done_dir)):
+        if fname.endswith(".ready"):
+            task_id = fname[:-6]
+            age = task_age_str(os.path.join(done_dir, f"{task_id}.json"), "completed_at")
+            desc = pending.get(task_id, {}).get("desc", task_id[:20])
+            ready_tasks.append((task_id, age, desc))
+
+# In flight
+inflight_tasks = []
+if os.path.exists(processing_dir):
+    for fname in sorted(os.listdir(processing_dir)):
+        if fname.endswith(".ready"):
+            task_id = fname[:-6]
+            age = task_age_str(os.path.join(processing_dir, f"{task_id}.json"), "created_at")
+            desc = pending.get(task_id, {}).get("desc", task_id[:20])
+            inflight_tasks.append((task_id, age, desc))
+
+# Monthly cost
+now = datetime.datetime.now(datetime.timezone.utc)
+month_prefix = now.strftime("%Y-%m")
+monthly_cost = 0.0
+if os.path.exists(costs_log):
+    with open(costs_log) as f:
+        for line in f:
+            parts = line.strip().split(" | ")
+            if len(parts) >= 6:
+                try:
+                    ts = parts[1]
+                    if ts.startswith(month_prefix):
+                        monthly_cost += float(parts[5])
+                except (ValueError, IndexError):
+                    pass
+
+month_name = now.strftime("%B %Y")
+
+print("=== Agent Relay Status ===")
+print(f"Daemon:     {daemon_status}")
+print(f"Queue:      {queue_count} pending")
+print(f"Processing: {processing_count} in-flight")
+print(f"Done:       {done_count} ready for pickup")
+
+if ready_tasks:
+    print()
+    print("READY FOR PICKUP:")
+    for task_id, age, desc in ready_tasks:
+        print(f"  {task_id[:8]}  [{age}]  {desc[:60]}")
+
+if inflight_tasks:
+    print()
+    print("IN FLIGHT:")
+    for task_id, age, desc in inflight_tasks:
+        print(f"  {task_id[:8]}  [{age}]  {desc[:60]}")
+
+print()
+print(f"Monthly cost ({month_name}): ${monthly_cost:.2f}")
+print("==========================")
+PYEOF

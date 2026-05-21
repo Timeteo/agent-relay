@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# relay-install: deploy agent-relay from git repo. Idempotent — safe to re-run.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+RELAY_DIR="${AGENT_RELAY_DIR:-$HOME/.agent-relay}"
+BIN_DIR="$RELAY_DIR/bin"
+
+log() { echo "[relay-install] $*"; }
+warn() { echo "[relay-install] WARNING: $*" >&2; }
+
+log "Installing from $REPO_DIR → $RELAY_DIR"
+
+# 1. Create directories
+mkdir -p "$BIN_DIR"
+mkdir -p "$RELAY_DIR"/{queue,processing,done,archive,logs}
+
+# 2. Copy scripts
+log "Copying scripts to $BIN_DIR..."
+cp "$REPO_DIR/bin/"* "$BIN_DIR/"
+chmod +x "$BIN_DIR/"*
+
+# 3. PATH
+SHELL_RC=""
+if [[ "$SHELL" == *"zsh"* ]]; then
+    SHELL_RC="$HOME/.zshrc"
+elif [[ "$SHELL" == *"bash"* ]]; then
+    SHELL_RC="$HOME/.bashrc"
+fi
+
+PATH_LINE='export PATH="$HOME/.agent-relay/bin:$PATH"'
+if [[ -n "$SHELL_RC" ]] && [[ -f "$SHELL_RC" ]]; then
+    if ! grep -q "agent-relay/bin" "$SHELL_RC"; then
+        { echo ""; echo "# agent-relay"; echo "$PATH_LINE"; } >> "$SHELL_RC"
+        log "Added ~/.agent-relay/bin to PATH in $SHELL_RC"
+    fi
+fi
+
+# 4. Default config (never overwrite existing)
+CONFIG="$RELAY_DIR/config.json"
+if [[ ! -f "$CONFIG" ]]; then
+    log "Writing default config.json..."
+    cat > "$CONFIG" <<'EOF'
+{
+  "version": "1.0",
+  "relay_dir": "~/.agent-relay",
+  "default_model": "qwen/qwen3-coder-480b-a35b",
+  "fallback_model": "google/gemini-flash-lite",
+  "openrouter": {
+    "api_key": "$OPENROUTER_API_KEY",
+    "base_url": "https://openrouter.ai/api/v1"
+  },
+  "watcher": {
+    "method": "inotify",
+    "poll_interval_seconds": 2
+  },
+  "timeouts": {
+    "worker_response_seconds": 120,
+    "task_expiry_seconds": 600
+  },
+  "retry": {
+    "max_attempts": 3,
+    "backoff_seconds": [2, 5, 15]
+  },
+  "logging": {
+    "level": "info",
+    "file": "~/.agent-relay/logs/relay.log"
+  }
+}
+EOF
+    chmod 600 "$CONFIG"
+fi
+
+# 5. .env template (never overwrite existing)
+ENV_FILE="$RELAY_DIR/.env"
+if [[ ! -f "$ENV_FILE" ]]; then
+    cp "$REPO_DIR/.env.example" "$ENV_FILE"
+    chmod 600 "$ENV_FILE"
+    log "Wrote .env template to $ENV_FILE"
+fi
+
+# 6. Python dependencies
+log "Installing Python dependencies..."
+if command -v pip3 &>/dev/null; then
+    pip3 install --quiet requests watchdog
+elif command -v pip &>/dev/null; then
+    pip install --quiet requests watchdog
+else
+    warn "pip not found — install manually: pip install requests watchdog"
+fi
+
+# 7. Autostart
+PLATFORM="$(uname -s)"
+if [[ "$PLATFORM" == "Darwin" ]]; then
+    PLIST_DST="$HOME/Library/LaunchAgents/com.agent-relay.worker.plist"
+    if [[ ! -f "$PLIST_DST" ]]; then
+        log "Installing macOS LaunchAgent..."
+        sed "s|~|$HOME|g" "$REPO_DIR/autostart/com.agent-relay.worker.plist" > "$PLIST_DST"
+        launchctl load "$PLIST_DST" 2>/dev/null && log "LaunchAgent loaded" \
+            || warn "launchctl load failed — use relay-daemon start manually"
+    fi
+elif [[ "$PLATFORM" == "Linux" ]]; then
+    SYSTEMD_DIR="$HOME/.config/systemd/user"
+    SVC_DST="$SYSTEMD_DIR/agent-relay.service"
+    if [[ ! -f "$SVC_DST" ]]; then
+        log "Installing systemd user service..."
+        mkdir -p "$SYSTEMD_DIR"
+        sed "s|~|$HOME|g" "$REPO_DIR/autostart/agent-relay.service" > "$SVC_DST"
+        systemctl --user enable --now agent-relay 2>/dev/null && log "systemd service enabled" \
+            || warn "systemctl failed — use relay-daemon start manually"
+    fi
+fi
+
+# 8. CC hooks
+CLAUDE_SETTINGS="$HOME/.claude/settings.json"
+if [[ -f "$CLAUDE_SETTINGS" ]]; then
+    if ! grep -q "relay-status" "$CLAUDE_SETTINGS"; then
+        log "Wiring Claude Code hooks..."
+        python3 - <<PYEOF
+import json
+
+path = "$CLAUDE_SETTINGS"
+with open(path) as f:
+    settings = json.load(f)
+
+hooks = settings.setdefault("hooks", {})
+
+def ensure_hook(event, command):
+    entries = hooks.setdefault(event, [])
+    for entry in entries:
+        for h in entry.get("hooks", []):
+            if h.get("command") == command:
+                return
+    entries.append({"matcher": "", "hooks": [{"type": "command", "command": command}]})
+
+ensure_hook("PostCompact", "relay-status")
+ensure_hook("Startup", "relay-status")
+
+with open(path, "w") as f:
+    json.dump(settings, f, indent=2)
+print("[relay-install] CC hooks wired")
+PYEOF
+    else
+        log "CC hooks already present"
+    fi
+else
+    warn "~/.claude/settings.json not found — wire hooks manually after Claude Code setup"
+fi
+
+# 9. CLAUDE.md
+CLAUDE_MD="$HOME/.claude/CLAUDE.md"
+APPEND_SRC="$REPO_DIR/claude/CLAUDE.md.append"
+if [[ -f "$APPEND_SRC" ]] && [[ -d "$HOME/.claude" ]]; then
+    if [[ ! -f "$CLAUDE_MD" ]] || ! grep -q "Agent Relay" "$CLAUDE_MD"; then
+        log "Appending relay instructions to CLAUDE.md..."
+        echo "" >> "$CLAUDE_MD"
+        cat "$APPEND_SRC" >> "$CLAUDE_MD"
+    else
+        log "CLAUDE.md already has relay instructions"
+    fi
+fi
+
+# 10. Final permissions
+chmod 600 "$CONFIG" "$ENV_FILE" 2>/dev/null || true
+
+# Summary
+echo ""
+echo "=== relay-install complete ==="
+echo ""
+echo "Next steps:"
+echo "  1. Edit $ENV_FILE — add your OPENROUTER_API_KEY"
+echo "  2. relay-daemon start"
+echo "  3. relay-status"
+if [[ -n "${SHELL_RC:-}" ]]; then
+    echo ""
+    echo "Reload PATH: source $SHELL_RC"
+    echo "Or now:      export PATH=\"\$HOME/.agent-relay/bin:\$PATH\""
+fi

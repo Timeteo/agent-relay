@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+RELAY_DIR="${AGENT_RELAY_DIR:-$HOME/.agent-relay}"
+DONE_DIR="$RELAY_DIR/done"
+QUEUE_DIR="$RELAY_DIR/queue"
+PROCESSING_DIR="$RELAY_DIR/processing"
+ARCHIVE_DIR="$RELAY_DIR/archive"
+CONFIG="$RELAY_DIR/config.json"
+
+usage() {
+    echo "Usage: relay-pickup --task-id <task_id>" >&2
+    exit 1
+}
+
+TASK_ID=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --task-id)  TASK_ID="$2"; shift 2 ;;
+        -h|--help)  usage ;;
+        *)          echo "Error: Unknown argument: $1" >&2; usage ;;
+    esac
+done
+
+[[ -z "$TASK_ID" ]] && { echo "Error: --task-id is required" >&2; usage; }
+
+DONE_JSON="$DONE_DIR/${TASK_ID}.json"
+DONE_SENTINEL="$DONE_DIR/${TASK_ID}.ready"
+QUEUE_JSON="$QUEUE_DIR/${TASK_ID}.json"
+PROCESSING_JSON="$PROCESSING_DIR/${TASK_ID}.json"
+ARCHIVE_JSON="$ARCHIVE_DIR/${TASK_ID}.json"
+
+RELAY_TASK_ID="$TASK_ID" \
+RELAY_DIR="$RELAY_DIR" \
+DONE_JSON="$DONE_JSON" \
+DONE_SENTINEL="$DONE_SENTINEL" \
+QUEUE_JSON="$QUEUE_JSON" \
+PROCESSING_JSON="$PROCESSING_JSON" \
+ARCHIVE_JSON="$ARCHIVE_JSON" \
+CONFIG="$CONFIG" \
+python3 - <<'PYEOF'
+import json, os, datetime, sys
+
+task_id = os.environ["RELAY_TASK_ID"]
+done_json = os.environ["DONE_JSON"]
+done_sentinel = os.environ["DONE_SENTINEL"]
+queue_json = os.environ["QUEUE_JSON"]
+processing_json = os.environ["PROCESSING_JSON"]
+archive_json = os.environ["ARCHIVE_JSON"]
+config_path = os.environ["CONFIG"]
+
+# Get expiry config
+try:
+    with open(config_path) as f:
+        config = json.load(f)
+    expiry = config.get("timeouts", {}).get("task_expiry_seconds", 600)
+except Exception:
+    expiry = 600
+
+# Result ready
+if os.path.exists(done_sentinel):
+    with open(done_json) as f:
+        result = json.load(f)
+    status = result.get("status", "unknown")
+    if status == "success":
+        print(result.get("response", ""))
+    elif status == "error":
+        print(f"ERROR: {result.get('error', 'unknown error')}")
+    elif status == "timeout":
+        print("TIMEOUT")
+    else:
+        print(f"ERROR: unknown status: {status}")
+    # Clean up done sentinel
+    try:
+        os.remove(done_sentinel)
+    except FileNotFoundError:
+        pass
+    sys.exit(0)
+
+# Task not yet done — find it
+if not os.path.exists(queue_json) and not os.path.exists(processing_json):
+    # Check if already archived (previously picked up or done)
+    if os.path.exists(done_json):
+        with open(done_json) as f:
+            result = json.load(f)
+        status = result.get("status", "unknown")
+        if status == "success":
+            print(result.get("response", ""))
+        else:
+            print(f"ERROR: {result.get('error', 'unknown error')}")
+    elif os.path.exists(archive_json):
+        print("ERROR: task already archived — result was already picked up")
+    else:
+        print(f"ERROR: task {task_id} not found")
+    sys.exit(0)
+
+# Check for timeout
+task_file = queue_json if os.path.exists(queue_json) else processing_json
+try:
+    with open(task_file) as f:
+        task = json.load(f)
+    created = datetime.datetime.fromisoformat(task["created_at"].replace("Z", "+00:00"))
+    now = datetime.datetime.now(datetime.timezone.utc)
+    age = (now - created).total_seconds()
+    if age > expiry:
+        print("TIMEOUT")
+        sys.exit(0)
+except Exception:
+    pass
+
+print("PENDING")
+PYEOF

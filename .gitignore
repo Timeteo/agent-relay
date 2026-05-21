@@ -1,0 +1,12 @@
+# Never commit local data or secrets
+config.json
+.env
+queue/
+processing/
+done/
+archive/
+logs/
+*.pid
+pending.log
+__pycache__/
+*.pyc

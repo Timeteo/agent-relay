@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+RELAY_DIR="${AGENT_RELAY_DIR:-$HOME/.agent-relay}"
+PID_FILE="$RELAY_DIR/relay-worker.pid"
+QUEUE_DIR="$RELAY_DIR/queue"
+PENDING_LOG="$RELAY_DIR/pending.log"
+
+usage() {
+    echo "Usage: relay-drop --prompt <text> [--context <text>] [--format code|explanation|json|markdown] [--model <model>]" >&2
+    exit 1
+}
+
+PROMPT=""
+CONTEXT=""
+FORMAT="markdown"
+MODEL=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --prompt)   PROMPT="$2";  shift 2 ;;
+        --context)  CONTEXT="$2"; shift 2 ;;
+        --format)   FORMAT="$2";  shift 2 ;;
+        --model)    MODEL="$2";   shift 2 ;;
+        -h|--help)  usage ;;
+        *)          echo "Error: Unknown argument: $1" >&2; usage ;;
+    esac
+done
+
+[[ -z "$PROMPT" ]] && { echo "Error: --prompt is required" >&2; usage; }
+
+# Check daemon is running
+if [[ ! -f "$PID_FILE" ]]; then
+    echo "Error: relay-worker is not running (no PID file at $PID_FILE)" >&2
+    echo "Start with: relay-daemon start" >&2
+    exit 1
+fi
+PID=$(cat "$PID_FILE")
+if ! kill -0 "$PID" 2>/dev/null; then
+    echo "Error: relay-worker (pid $PID) is not running" >&2
+    echo "Restart with: relay-daemon restart" >&2
+    exit 1
+fi
+
+TASK_ID=$(python3 -c "import uuid; print(str(uuid.uuid4()))")
+CREATED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+PROMPT_SHORT="${PROMPT:0:80}"
+
+# Write task file and sentinel via Python (handles special chars safely)
+RELAY_PROMPT="$PROMPT" \
+RELAY_CONTEXT="${CONTEXT:-}" \
+RELAY_FORMAT="$FORMAT" \
+RELAY_MODEL="${MODEL:-}" \
+RELAY_TASK_ID="$TASK_ID" \
+RELAY_CREATED_AT="$CREATED_AT" \
+RELAY_DIR="$RELAY_DIR" \
+python3 - <<'PYEOF'
+import json, os
+
+relay_dir = os.environ["RELAY_DIR"]
+queue_dir = os.path.join(relay_dir, "queue")
+config_path = os.path.join(relay_dir, "config.json")
+
+task_id = os.environ["RELAY_TASK_ID"]
+created_at = os.environ["RELAY_CREATED_AT"]
+prompt = os.environ["RELAY_PROMPT"]
+context = os.environ.get("RELAY_CONTEXT", "")
+fmt = os.environ.get("RELAY_FORMAT", "markdown")
+model = os.environ.get("RELAY_MODEL", "")
+
+if not model:
+    try:
+        with open(config_path) as f:
+            config = json.load(f)
+        model = config.get("default_model", "qwen/qwen3-coder-480b-a35b")
+    except Exception:
+        model = "qwen/qwen3-coder-480b-a35b"
+
+task = {
+    "task_id": task_id,
+    "created_at": created_at,
+    "model": model,
+    "prompt": prompt,
+    "context": context,
+    "output_format": fmt,
+    "originator": "claude-code"
+}
+
+task_file = os.path.join(queue_dir, f"{task_id}.json")
+sentinel_file = os.path.join(queue_dir, f"{task_id}.ready")
+
+with open(task_file, "w") as f:
+    json.dump(task, f, indent=2)
+
+# Write sentinel only after JSON is fully written
+with open(sentinel_file, "w") as f:
+    pass
+PYEOF
+
+# Append to pending.log
+echo "${TASK_ID} | ${CREATED_AT} | ${PROMPT_SHORT}" >> "$PENDING_LOG"
+
+echo "RELAY_TASK_ID=${TASK_ID}"

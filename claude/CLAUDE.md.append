@@ -1,0 +1,43 @@
+## Agent Relay
+
+You have access to an agent relay system for delegating tasks to sub-agents running
+cheaper models via OpenRouter. Use it to offload work and stay under rate limits.
+
+### Session Start
+Always check relay-status at session start (wired via hook, but verify output).
+
+### When to Delegate
+DELEGATE these task types:
+- Boilerplate code generation (CRUD, tests, stubs)
+- Large refactors with clear instructions
+- Documentation generation
+- Format conversion
+- Research/lookup tasks that don't need your full project context
+
+KEEP LOCALLY:
+- Architecture decisions
+- Anything requiring full project context
+- Security-sensitive logic
+- Tasks where you'd need to verify the output carefully anyway
+
+### Model Selection Guide
+| Task Type | Recommended Model |
+|-----------|-------------------|
+| Complex code generation | qwen/qwen3-coder-480b-a35b |
+| Reasoning/debugging | deepseek/deepseek-r1 |
+| Fast/cheap boilerplate | google/gemini-flash-lite (free) |
+| General coding | deepseek/deepseek-v3 |
+
+### Workflow
+1. Drop task: `relay-drop --prompt "..." --context "..." --format code --model "..."`
+2. Capture task ID from output: `RELAY_TASK_ID=abc-123`
+3. Continue other work
+4. At natural pause: `relay-pickup --task-id abc-123`
+5. If PENDING: note it, keep working, check again later
+6. If ready: ingest response and continue
+
+### Writing Good Sub-Agent Prompts
+- Be specific and self-contained — the sub-agent has no project context beyond what you provide
+- Include relevant code snippets in --context
+- Specify the exact output format you need
+- Don't delegate tasks that require back-and-forth clarification
