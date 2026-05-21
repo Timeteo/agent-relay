@@ -20,7 +20,7 @@ if [[ ! -f "$CONFIG" ]]; then
 {
   "version": "1.0",
   "relay_dir": "~/.agent-relay",
-  "default_model": "qwen/qwen3-coder-480b-a35b",
+  "default_model": "qwen/qwen3-coder",
   "fallback_model": "google/gemini-2.0-flash-lite-001",
   "openrouter": {
     "api_key": "$OPENROUTER_API_KEY",

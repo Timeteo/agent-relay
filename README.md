@@ -46,7 +46,7 @@ relay-drop \
   --prompt "write unit tests for this function" \
   --context "$(cat myfile.py)" \
   --format code \
-  --model "qwen/qwen3-coder-480b-a35b"
+  --model "qwen/qwen3-coder"
 # → RELAY_TASK_ID=abc-123-def-456
 ```
 
@@ -90,7 +90,7 @@ Monthly cost (May 2026): $0.42
 
 | Task Type | Recommended Model |
 |-----------|-------------------|
-| Complex code generation | `qwen/qwen3-coder-480b-a35b` |
+| Complex code generation | `qwen/qwen3-coder` |
 | Reasoning / debugging | `deepseek/deepseek-r1` |
 | Fast / cheap boilerplate | `google/gemini-2.0-flash-lite-001` (free tier) |
 | General coding | `deepseek/deepseek-v3` |
